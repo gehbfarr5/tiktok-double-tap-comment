@@ -1,0 +1,2 @@
+-keep class dev.tiktok.doubletapcomment.hook.MainHook { *; }
+-keep class dev.tiktok.doubletapcomment.hook.** { *; }

@@ -1,0 +1,23 @@
+# Gradle / Android build output
+.gradle/
+build/
+app/build/
+
+# IDE files
+.idea/
+*.iml
+
+# Local machine configuration
+local.properties
+
+# OS files
+.DS_Store
+
+# Signing artifacts
+*.jks
+*.keystore
+*.pem
+*.p12
+
+# Logs
+*.log
