@@ -7,7 +7,6 @@ import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
-import java.util.WeakHashMap
 import java.lang.ref.WeakReference
 
 class MainHook : IXposedHookLoadPackage {
@@ -56,12 +55,16 @@ class MainHook : IXposedHookLoadPackage {
         private fun hookCommentAbilityBinding(): Boolean {
             val commentClass = findClass("com.ss.android.ugc.aweme.feed.assem.videocomment.VideoCommentAssem")
                 ?: return false.also { log("VideoCommentAssem not found") }
-            val videoItemParamsClass = findClass("com.ss.android.ugc.aweme.feed.model.VideoItemParams")
-                ?: return false.also { log("VideoItemParams not found") }
 
             var installed = false
-            installed = hookAfter(commentClass, "Nq", videoItemParamsClass) {
+            installed = hookAllAfter(commentClass, "Nq") {
                 commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
+            } || installed
+            installed = hookAfter(commentClass, "onParentSet") {
+                commentRegistry.registerCurrentBinding(it.thisObject, cl)
+            } || installed
+            installed = hookAfter(commentClass, "onViewCreated", android.view.View::class.java) {
+                commentRegistry.registerCurrentBinding(it.thisObject, cl)
             } || installed
 
             return installed
@@ -74,35 +77,25 @@ class MainHook : IXposedHookLoadPackage {
             }
 
             val byAid = commentRegistry.findByAid(currentAid)
-            if (invokeKb0IfMatches(byAid, currentAid, "aid-cache")) return true
-
-            val direct = TikTokReflect.findAbilityFromOwner(
-                owner = diggComponent,
-                abilityClassName = COMMENT_ABILITY_CLASS,
-                cl = cl
-            )
-            if (invokeKb0IfMatches(direct, currentAid, "direct-scope")) return true
-
-            val cached = commentRegistry.findForOwner(diggComponent, cl)
-            return invokeKb0IfMatches(cached, currentAid, "cached-scope")
+            return invokeKb0IfMatches(byAid, currentAid)
         }
 
-        private fun invokeKb0IfMatches(ability: Any?, expectedAid: String, source: String): Boolean {
+        private fun invokeKb0IfMatches(ability: Any?, expectedAid: String): Boolean {
             if (ability == null) return false
             val actualAid = TikTokReflect.boundAwemeAidFromCommentAbility(ability)
             if (actualAid != expectedAid) {
                 log(
-                    "blocked mismatched comment ability via $source; " +
+                    "blocked mismatched comment ability; " +
                         "expected=${shortAid(expectedAid)} actual=${shortAid(actualAid)}"
                 )
                 return false
             }
             return runCatching {
                 XposedHelpers.callMethod(ability, "Kb0")
-                log("opened comment panel via $source aid=${shortAid(expectedAid)}")
+                log("opened comment panel via aid-cache aid=${shortAid(expectedAid)}")
                 true
             }.getOrElse {
-                log("failed to invoke IVideoCommentAbility.Kb0 via $source: ${it.message}", it)
+                log("failed to invoke IVideoCommentAbility.Kb0: ${it.message}", it)
                 false
             }
         }
@@ -129,6 +122,26 @@ class MainHook : IXposedHookLoadPackage {
             }.isSuccess
         }
 
+        private fun hookAllAfter(
+            clazz: Class<*>,
+            methodName: String,
+            after: (XC_MethodHook.MethodHookParam) -> Unit
+        ): Boolean {
+            return runCatching {
+                XposedBridge.hookAllMethods(
+                    clazz,
+                    methodName,
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            after(param)
+                        }
+                    }
+                ).isNotEmpty()
+            }.onFailure {
+                log("failed to hook all ${clazz.name}.$methodName: ${it.message}", it)
+            }.getOrDefault(false)
+        }
+
         private fun findClass(name: String): Class<*>? {
             return runCatching { XposedHelpers.findClassIfExists(name, cl) }.getOrNull()
         }
@@ -136,32 +149,31 @@ class MainHook : IXposedHookLoadPackage {
 
     private class CommentAbilityRegistry {
         private val byAid = LinkedHashMap<String, WeakReference<Any>>()
-        private val byScope = WeakHashMap<Any, WeakReference<Any>>()
 
         @Synchronized
         fun registerBoundComment(commentAssem: Any, videoItemParams: Any?, cl: ClassLoader) {
             if (!TikTokReflect.isInstance(commentAssem, COMMENT_ABILITY_CLASS, cl)) return
-            val aid = TikTokReflect.aidFromVideoItemParams(videoItemParams) ?: return
+            val aid = TikTokReflect.aidFromVideoItemParams(videoItemParams)
+                ?: TikTokReflect.boundAwemeAidFromCommentAbility(commentAssem)
+                ?: return
+            register(commentAssem, aid)
+        }
+
+        @Synchronized
+        fun registerCurrentBinding(commentAssem: Any, cl: ClassLoader) {
+            if (!TikTokReflect.isInstance(commentAssem, COMMENT_ABILITY_CLASS, cl)) return
+            val aid = TikTokReflect.boundAwemeAidFromCommentAbility(commentAssem) ?: return
+            register(commentAssem, aid)
+        }
+
+        private fun register(commentAssem: Any, aid: String) {
             byAid[aid] = WeakReference(commentAssem)
             trimAidCache()
-
-            val scope = TikTokReflect.scopeFor(commentAssem, cl)
-            if (scope != null) {
-                byScope[scope] = WeakReference(commentAssem)
-                log("registered comment ability aid=${shortAid(aid)} scope=${scope.javaClass.name}")
-            } else {
-                log("registered comment ability aid=${shortAid(aid)} without scope")
-            }
+            log("registered comment ability aid=${shortAid(aid)}")
         }
 
         @Synchronized
         fun findByAid(aid: String): Any? = byAid[aid]?.get()
-
-        @Synchronized
-        fun findForOwner(owner: Any, cl: ClassLoader): Any? {
-            val scope = TikTokReflect.scopeFor(owner, cl) ?: return null
-            return byScope[scope]?.get()
-        }
 
         private fun trimAidCache() {
             if (byAid.size <= MAX_AID_CACHE_SIZE) return
@@ -174,19 +186,12 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private object TikTokReflect {
-        fun findAbilityFromOwner(owner: Any, abilityClassName: String, cl: ClassLoader): Any? {
-            val abilityClass = findClass(abilityClassName, cl) ?: return null
-            val scope = scopeFor(owner, cl) ?: owner
-            return callStatic("X.C1268304yd", cl, "LIZ", scope, abilityClass, null)
-        }
-
-        fun scopeFor(owner: Any, cl: ClassLoader): Any? {
-            return callStatic("X.C1268304yd", cl, "LJIIL", owner)
-        }
-
         fun currentAwemeAidFromDigg(diggComponent: Any): String? {
             val viewPagerAbility = callMethod(diggComponent, "zb") ?: return null
-            val aweme = callMethod(viewPagerAbility, "LJIIIIZZ") ?: return null
+            val currentCell = callMethod(viewPagerAbility, "BR")
+                ?: callMethod(viewPagerAbility, "LJLIIL")
+                ?: return null
+            val aweme = callMethod(currentCell, "getAweme") ?: return null
             return aidFromAweme(aweme)
         }
 
@@ -227,15 +232,6 @@ class MainHook : IXposedHookLoadPackage {
                 XposedHelpers.getObjectField(instance, field)
             }.onFailure {
                 log("reflect field failed: ${instance.javaClass.name}.$field: ${it.message}")
-            }.getOrNull()
-        }
-
-        private fun callStatic(className: String, cl: ClassLoader, method: String, vararg args: Any?): Any? {
-            return runCatching {
-                val clazz = XposedHelpers.findClass(className, cl)
-                XposedHelpers.callStaticMethod(clazz, method, *args)
-            }.onFailure {
-                log("reflect call failed: $className.$method: ${it.message}")
             }.getOrNull()
         }
 

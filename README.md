@@ -112,7 +112,6 @@ Useful log messages:
 
 - `installed hooks: 2` means the main hook and comment ability cache hook were installed.
 - `opened comment panel via aid-cache` means the module resolved the comment ability bound to the current video.
-- `opened comment panel via direct-scope` or `cached-scope` means a scope lookup was used after verifying the bound video id.
 - `blocked mismatched comment ability` means a stale or recycled feed cell was rejected to avoid opening comments for the wrong video.
 - `double tap swallowed; comment ability unavailable` means double-tap like was blocked, but the module could not safely open comments.
 
