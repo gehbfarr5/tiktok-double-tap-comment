@@ -24,6 +24,7 @@
 
    - Double-tap feed video opens comments.
    - Double-tap does not like the video.
+   - Close comments, swipe to the next video, and double-tap again; comments must match the current video.
    - Right-side like button still works.
    - Right-side comment button still works.
 
