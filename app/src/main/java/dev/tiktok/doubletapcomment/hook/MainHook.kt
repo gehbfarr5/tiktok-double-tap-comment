@@ -67,6 +67,9 @@ class MainHook : IXposedHookLoadPackage {
             installed = hookAllAfter(commentClass, "Xq") {
                 commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
             } || installed
+            installed = hookAllAfter(commentClass, "br") {
+                commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
+            } || installed
             installed = hookAfter(commentClass, "onParentSet") {
                 commentRegistry.registerCurrentBinding(it.thisObject, cl)
             } || installed
@@ -266,7 +269,7 @@ class MainHook : IXposedHookLoadPackage {
 
     private object TikTokReflect {
         fun currentAwemeAidFromDigg(diggComponent: Any): String? {
-            val viewPagerAbility = firstMethodResult(diggComponent, "Qb", "zb") ?: return null
+            val viewPagerAbility = firstMethodResult(diggComponent, "Ub", "Qb", "zb") ?: return null
 
             firstAwemeAidFrom(
                 viewPagerAbility,
@@ -275,7 +278,7 @@ class MainHook : IXposedHookLoadPackage {
                 "l41"
             )?.let { return it }
 
-            firstMethodResult(viewPagerAbility, "LJLIL", "BR", "LJLIIL")?.let { currentCell ->
+            firstMethodResult(viewPagerAbility, "MR", "LJLIL", "BR", "LJLIIL")?.let { currentCell ->
                 aidFromAwemeLike(currentCell)?.let { return it }
             }
 
@@ -368,7 +371,7 @@ class MainHook : IXposedHookLoadPackage {
         private const val MAX_AID_CACHE_SIZE = 12
         private const val COMMENT_ABILITY_CLASS =
             "com.ss.android.ugc.aweme.feed.assem.ability.IVideoCommentAbility"
-        private val COMMENT_OPEN_METHODS = listOf("Kb0", "jc0")
+        private val COMMENT_OPEN_METHODS = listOf("Kb0", "jc0", "cc0")
 
         private val TARGET_PACKAGES = setOf(
             "com.ss.android.ugc.trill",
