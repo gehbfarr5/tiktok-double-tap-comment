@@ -21,3 +21,15 @@ local.properties
 
 # Logs
 *.log
+
+# Orchestra runtime artifacts (local working state, not versioned)
+orchestra/.lock
+orchestra/.done
+orchestra/.codex-last.md
+orchestra/.codex-status
+orchestra/.baseline
+orchestra/.baseline-stash
+orchestra/.rx.patch
+orchestra/.auto-git
+orchestra/*.tmp
+orchestra/cost-ledger.tsv
