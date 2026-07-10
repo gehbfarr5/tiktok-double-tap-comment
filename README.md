@@ -6,7 +6,9 @@ When the module is active, double-tapping a video in the TikTok feed opens the n
 
 ## Status
 
-- Tested target: TikTok `45.5.4` / `versionCode 450504`
+- Tested targets:
+  - TikTok `45.5.4` / `versionCode 450504`
+  - TikTok `45.7.3` / `versionCode 450703`
 - Tested package: `com.ss.android.ugc.trill`
 - Framework: LSPosed API 82+
 - Android: tested on Android 16 with LSPosed
@@ -49,10 +51,14 @@ com.ss.android.ugc.aweme.feed.assem.ability.IVideoCommentAbility
 and calls:
 
 ```text
-Kb0()
+Kb0() or jc0()
 ```
 
 That reuses TikTok's own comment-opening flow, including comment availability checks, existing UI behavior, and internal event dispatch.
+
+For TikTok `45.7.3`, comment ability binding is refreshed from
+`VideoCommentAssem.Xq(VideoItemParams)`. Older builds may still use `Nq(...)`,
+so both names are hooked.
 
 If the comment ability cannot be resolved, the module still swallows the original double-tap event so double-tap like remains disabled.
 
@@ -111,7 +117,7 @@ DoubleTapComment
 Useful log messages:
 
 - `installed hooks: 2` means the main hook and comment ability cache hook were installed.
-- `opened comment panel via aid-cache` means the module resolved the comment ability bound to the current video.
+- `opened comment panel via jc0` or `opened comment panel via Kb0` means the module resolved the comment ability bound to the current video.
 - `blocked mismatched comment ability` means a stale or recycled feed cell was rejected to avoid opening comments for the wrong video.
 - `double tap swallowed; comment ability unavailable` means double-tap like was blocked, but the module could not safely open comments.
 

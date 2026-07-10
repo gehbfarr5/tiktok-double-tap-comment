@@ -1,6 +1,9 @@
 package dev.tiktok.doubletapcomment.hook
 
+import android.app.Dialog
 import android.view.MotionEvent
+import android.view.View
+import android.widget.PopupWindow
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
@@ -25,6 +28,7 @@ class MainHook : IXposedHookLoadPackage {
             var count = 0
             if (hookDiggDoubleTap()) count++
             if (hookCommentAbilityBinding()) count++
+            if (hookGestureDiagnostics()) count++
             return count
         }
 
@@ -60,6 +64,9 @@ class MainHook : IXposedHookLoadPackage {
             installed = hookAllAfter(commentClass, "Nq") {
                 commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
             } || installed
+            installed = hookAllAfter(commentClass, "Xq") {
+                commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
+            } || installed
             installed = hookAfter(commentClass, "onParentSet") {
                 commentRegistry.registerCurrentBinding(it.thisObject, cl)
             } || installed
@@ -77,10 +84,49 @@ class MainHook : IXposedHookLoadPackage {
             }
 
             val byAid = commentRegistry.findByAid(currentAid)
-            return invokeKb0IfMatches(byAid, currentAid)
+            if (byAid == null) {
+                log("double tap has no ability for aid=${shortAid(currentAid)} registry=${commentRegistry.snapshot()}")
+            }
+            return invokeCommentOpenIfMatches(byAid, currentAid)
         }
 
-        private fun invokeKb0IfMatches(ability: Any?, expectedAid: String): Boolean {
+        private fun hookGestureDiagnostics(): Boolean {
+            if (!DIAGNOSTIC_HOOKS) return false
+            var installed = false
+            installed = hookBefore(View::class.java, "performLongClick") {
+                val view = it.thisObject as? View
+                log("diagnostic performLongClick view=${describeView(view)} stack=${shortStack()}")
+            } || installed
+            installed = hookBefore(Dialog::class.java, "show") {
+                val dialog = it.thisObject as? Dialog
+                log("diagnostic Dialog.show class=${dialog?.javaClass?.name} stack=${shortStack()}")
+            } || installed
+            installed = hookBefore(
+                PopupWindow::class.java,
+                "showAtLocation",
+                View::class.java,
+                Int::class.javaPrimitiveType!!,
+                Int::class.javaPrimitiveType!!,
+                Int::class.javaPrimitiveType!!
+            ) {
+                val popup = it.thisObject as? PopupWindow
+                log("diagnostic PopupWindow.showAtLocation class=${popup?.javaClass?.name} stack=${shortStack()}")
+            } || installed
+            installed = hookBefore(
+                PopupWindow::class.java,
+                "showAsDropDown",
+                View::class.java,
+                Int::class.javaPrimitiveType!!,
+                Int::class.javaPrimitiveType!!,
+                Int::class.javaPrimitiveType!!
+            ) {
+                val popup = it.thisObject as? PopupWindow
+                log("diagnostic PopupWindow.showAsDropDown class=${popup?.javaClass?.name} stack=${shortStack()}")
+            } || installed
+            return installed
+        }
+
+        private fun invokeCommentOpenIfMatches(ability: Any?, expectedAid: String): Boolean {
             if (ability == null) return false
             val actualAid = TikTokReflect.boundAwemeAidFromCommentAbility(ability)
             if (actualAid != expectedAid) {
@@ -90,14 +136,18 @@ class MainHook : IXposedHookLoadPackage {
                 )
                 return false
             }
-            return runCatching {
-                XposedHelpers.callMethod(ability, "Kb0")
-                log("opened comment panel via aid-cache aid=${shortAid(expectedAid)}")
-                true
-            }.getOrElse {
-                log("failed to invoke IVideoCommentAbility.Kb0: ${it.message}", it)
-                false
+            var lastFailure: Throwable? = null
+            for (method in COMMENT_OPEN_METHODS) {
+                runCatching {
+                    XposedHelpers.callMethod(ability, method)
+                    log("opened comment panel via $method aid=${shortAid(expectedAid)}")
+                    return true
+                }.onFailure {
+                    lastFailure = it
+                }
             }
+            log("failed to invoke comment open methods $COMMENT_OPEN_METHODS: ${lastFailure?.message}")
+            return false
         }
 
         private fun hookAfter(
@@ -114,6 +164,28 @@ class MainHook : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
                             after(param)
+                        }
+                    }
+                )
+            }.onFailure {
+                log("failed to hook ${clazz.name}.$methodName: ${it.message}", it)
+            }.isSuccess
+        }
+
+        private fun hookBefore(
+            clazz: Class<*>,
+            methodName: String,
+            vararg parameterTypes: Any,
+            before: (XC_MethodHook.MethodHookParam) -> Unit
+        ): Boolean {
+            return runCatching {
+                XposedHelpers.findAndHookMethod(
+                    clazz,
+                    methodName,
+                    *parameterTypes,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            before(param)
                         }
                     }
                 )
@@ -175,6 +247,13 @@ class MainHook : IXposedHookLoadPackage {
         @Synchronized
         fun findByAid(aid: String): Any? = byAid[aid]?.get()
 
+        @Synchronized
+        fun snapshot(): String {
+            return byAid.entries.joinToString(prefix = "[", postfix = "]") { (aid, ref) ->
+                "${shortAid(aid)}:${if (ref.get() == null) "cleared" else "alive"}"
+            }
+        }
+
         private fun trimAidCache() {
             if (byAid.size <= MAX_AID_CACHE_SIZE) return
             val iterator = byAid.entries.iterator()
@@ -187,12 +266,20 @@ class MainHook : IXposedHookLoadPackage {
 
     private object TikTokReflect {
         fun currentAwemeAidFromDigg(diggComponent: Any): String? {
-            val viewPagerAbility = callMethod(diggComponent, "zb") ?: return null
-            val currentCell = callMethod(viewPagerAbility, "BR")
-                ?: callMethod(viewPagerAbility, "LJLIIL")
-                ?: return null
-            val aweme = callMethod(currentCell, "getAweme") ?: return null
-            return aidFromAweme(aweme)
+            val viewPagerAbility = firstMethodResult(diggComponent, "Qb", "zb") ?: return null
+
+            firstAwemeAidFrom(
+                viewPagerAbility,
+                "LJIIIIZZ",
+                "LLLLLLIL",
+                "l41"
+            )?.let { return it }
+
+            firstMethodResult(viewPagerAbility, "LJLIL", "BR", "LJLIIL")?.let { currentCell ->
+                aidFromAwemeLike(currentCell)?.let { return it }
+            }
+
+            return null
         }
 
         fun boundAwemeAidFromCommentAbility(commentAbility: Any?): String? {
@@ -213,8 +300,36 @@ class MainHook : IXposedHookLoadPackage {
             return clazz.isInstance(value)
         }
 
+        private fun firstAwemeAidFrom(instance: Any?, vararg methods: String): String? {
+            if (instance == null) return null
+            for (method in methods) {
+                val aid = aidFromAwemeLike(callMethodQuiet(instance, method))
+                if (aid != null) return aid
+            }
+            return null
+        }
+
+        private fun firstMethodResult(instance: Any?, vararg methods: String): Any? {
+            if (instance == null) return null
+            for (method in methods) {
+                val result = callMethodQuiet(instance, method)
+                if (result != null) return result
+            }
+            log("none of ${methods.joinToString(prefix = "[", postfix = "]")} worked on ${instance.javaClass.name}")
+            return null
+        }
+
+        private fun aidFromAwemeLike(value: Any?): String? {
+            if (value == null) return null
+            aidFromAweme(value)?.let { return it }
+            val aweme = callMethodQuiet(value, "getAweme")
+                ?: callMethodQuiet(callMethodQuiet(value, "getItem"), "getAweme")
+                ?: return null
+            return aidFromAweme(aweme)
+        }
+
         private fun aidFromAweme(aweme: Any?): String? {
-            return callMethod(aweme, "getAid") as? String
+            return callMethodQuiet(aweme, "getAid") as? String
         }
 
         private fun callMethod(instance: Any?, method: String, vararg args: Any?): Any? {
@@ -223,6 +338,13 @@ class MainHook : IXposedHookLoadPackage {
                 XposedHelpers.callMethod(instance, method, *args)
             }.onFailure {
                 log("reflect call failed: ${instance.javaClass.name}.$method: ${it.message}")
+            }.getOrNull()
+        }
+
+        private fun callMethodQuiet(instance: Any?, method: String, vararg args: Any?): Any? {
+            if (instance == null) return null
+            return runCatching {
+                XposedHelpers.callMethod(instance, method, *args)
             }.getOrNull()
         }
 
@@ -242,9 +364,11 @@ class MainHook : IXposedHookLoadPackage {
 
     companion object {
         private const val TAG = "DoubleTapComment"
+        private const val DIAGNOSTIC_HOOKS = false
         private const val MAX_AID_CACHE_SIZE = 12
         private const val COMMENT_ABILITY_CLASS =
             "com.ss.android.ugc.aweme.feed.assem.ability.IVideoCommentAbility"
+        private val COMMENT_OPEN_METHODS = listOf("Kb0", "jc0")
 
         private val TARGET_PACKAGES = setOf(
             "com.ss.android.ugc.trill",
@@ -262,6 +386,21 @@ class MainHook : IXposedHookLoadPackage {
         private fun shortAid(aid: String?): String {
             if (aid.isNullOrBlank()) return "null"
             return "#${aid.hashCode().toUInt().toString(16)}"
+        }
+
+        private fun describeView(view: View?): String {
+            if (view == null) return "null"
+            val idName = runCatching {
+                if (view.id == View.NO_ID) "" else view.resources.getResourceEntryName(view.id)
+            }.getOrDefault("")
+            return "${view.javaClass.name} id=$idName clickable=${view.isClickable} longClickable=${view.isLongClickable}"
+        }
+
+        private fun shortStack(): String {
+            return Throwable().stackTrace
+                .drop(2)
+                .take(10)
+                .joinToString(" <- ") { "${it.className}.${it.methodName}:${it.lineNumber}" }
         }
     }
 }
