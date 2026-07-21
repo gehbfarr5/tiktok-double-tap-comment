@@ -70,6 +70,10 @@ class MainHook : IXposedHookLoadPackage {
             installed = hookAllAfter(commentClass, "br") {
                 commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
             } || installed
+            // TikTok 46.0.3: bind method rotated br -> up(VideoItemParams)
+            installed = hookAllAfter(commentClass, "up") {
+                commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
+            } || installed
             installed = hookAfter(commentClass, "onParentSet") {
                 commentRegistry.registerCurrentBinding(it.thisObject, cl)
             } || installed
@@ -86,11 +90,17 @@ class MainHook : IXposedHookLoadPackage {
                 return false
             }
 
-            val byAid = commentRegistry.findByAid(currentAid)
-            if (byAid == null) {
+            // Fast path: ability registered under this aid. Fallback: TikTok recycles a
+            // small pool of comment-assem instances, and on scroll it rebinds an existing
+            // instance to a new aweme WITHOUT re-invoking onBind (`up`), so the registry key
+            // goes stale while the live binding (LLJI.LL) tracks the current video. Scan the
+            // pooled abilities by their LIVE bound aid to find the current cell's ability.
+            val ability = commentRegistry.findByAid(currentAid)
+                ?: commentRegistry.findByLiveAid(currentAid)
+            if (ability == null) {
                 log("double tap has no ability for aid=${shortAid(currentAid)} registry=${commentRegistry.snapshot()}")
             }
-            return invokeCommentOpenIfMatches(byAid, currentAid)
+            return invokeCommentOpenIfMatches(ability, currentAid)
         }
 
         private fun hookGestureDiagnostics(): Boolean {
@@ -250,6 +260,19 @@ class MainHook : IXposedHookLoadPackage {
         @Synchronized
         fun findByAid(aid: String): Any? = byAid[aid]?.get()
 
+        // Recycled-cell resolution: return the pooled comment ability whose LIVE bound aid
+        // (read fresh from LLJI.LL each call) matches, regardless of its stale registry key.
+        @Synchronized
+        fun findByLiveAid(aid: String): Any? {
+            for (ref in byAid.values) {
+                val ability = ref.get() ?: continue
+                if (TikTokReflect.boundAwemeAidFromCommentAbility(ability) == aid) {
+                    return ability
+                }
+            }
+            return null
+        }
+
         @Synchronized
         fun snapshot(): String {
             return byAid.entries.joinToString(prefix = "[", postfix = "]") { (aid, ref) ->
@@ -371,7 +394,8 @@ class MainHook : IXposedHookLoadPackage {
         private const val MAX_AID_CACHE_SIZE = 12
         private const val COMMENT_ABILITY_CLASS =
             "com.ss.android.ugc.aweme.feed.assem.ability.IVideoCommentAbility"
-        private val COMMENT_OPEN_METHODS = listOf("Kb0", "jc0", "cc0")
+        // "Ob0" added for TikTok 46.0.3 (IVideoCommentAbility no-arg open, Xp(2, …))
+        private val COMMENT_OPEN_METHODS = listOf("Kb0", "jc0", "cc0", "Ob0")
 
         private val TARGET_PACKAGES = setOf(
             "com.ss.android.ugc.trill",

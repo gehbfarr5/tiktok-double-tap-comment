@@ -62,3 +62,28 @@ for aid. Adding `up` + `Ob0` restores both legs.
 High on `up` (sole bare-`VideoItemParams` method) and `Ob0` (sole no-arg void
 `@Override` of the targeted interface, `Xp(2, …)` matching the old `cc0` pattern).
 Runtime confirmation via `DoubleTapComment` logcat on device.
+
+## Addendum — recycled-cell resolution (on-device finding, 2026-07-21)
+First on-device test with `up`+`Ob0` alone: double-tap worked on the first few
+videos but failed after scrolling ("部分视频下失效"). Log showed the digg chain
+resolving the current aid correctly, but `registry` frozen at ~6 entries that
+never matched the current aid:
+```
+double tap has no ability for aid=#c68a7e24 registry=[#4986152:alive, …6 stable…]
+```
+Root cause: `up` is `VideoCommentAssem.onBind` (jadx marks the body
+`VideoCommentAssem@…onBind$1`) and fires when a cell is bound, but TikTok's feed
+reuses a small pool of comment-assem instances and, on scroll, rebinds an
+existing instance to a new aweme **without re-invoking `up`**. So the registry
+key (aid at first bind) goes stale while the instance's live binding
+(`LLJI.LL` → `VideoItemParams` → `getAweme().getAid()`) tracks the current video.
+
+Fix (not a new obfuscated name — an architectural correction): resolve the
+current cell's ability at double-tap time by scanning the pooled abilities by
+their **live** bound aid, not the stale registry key
+(`CommentAbilityRegistry.findByLiveAid`). `invokeCommentOpenIfMatches` still
+guards correctness by re-checking the live bound aid equals the expected aid.
+
+Verified on device: 5/5 double-taps across scrolled/recycled videos opened the
+panel via `Ob0` (aids #7117071e, #5991f9f5, #fd20408d, #71a96f3a, #1f80363c);
+zero `swallowed`/`no ability` after the fix.

@@ -11,6 +11,10 @@ When the module is active, double-tapping a video in the TikTok feed opens the n
   - TikTok `45.7.3` / `versionCode 450703`
   - TikTok `45.9.3` / `versionCode 450903` (comment-open method chain
     renamed again: see `docs/reverse-engineering-45.9.3.md`)
+  - TikTok `46.0.3` / `versionCode 460003` (bind `up`, open `Ob0`, plus a
+    recycled-cell resolution fix; see `docs/reverse-engineering-46.0.3.md`)
+    — on-device verified: 5/5 double-taps across scrolled/recycled videos
+    opened comments via `Ob0`.
 - Tested package: `com.ss.android.ugc.trill`
 - Framework: LSPosed API 82+
 - Android: tested on Android 16 with LSPosed
