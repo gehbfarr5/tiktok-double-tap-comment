@@ -15,6 +15,9 @@ When the module is active, double-tapping a video in the TikTok feed opens the n
     recycled-cell resolution fix; see `docs/reverse-engineering-46.0.3.md`)
     — on-device verified: 5/5 double-taps across scrolled/recycled videos
     opened comments via `Ob0`.
+  - TikTok `46.2.3` / `versionCode 460203` (bind `hs`, open `Id0`, view-pager
+    accessor `Yb`, and bound-params field `LLJIJIL`; see
+    `docs/reverse-engineering-46.2.3.md`)
 - Tested package: `com.ss.android.ugc.trill`
 - Framework: LSPosed API 82+
 - Android: tested on Android 16 with LSPosed

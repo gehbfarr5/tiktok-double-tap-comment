@@ -6,11 +6,11 @@ import android.view.View
 import android.widget.PopupWindow
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
 import java.lang.ref.WeakReference
+import java.lang.reflect.Modifier
 
 class MainHook : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: LoadPackageParam) {
@@ -41,13 +41,13 @@ class MainHook : IXposedHookLoadPackage {
                     diggClass,
                     "handleDoubleClick",
                     MotionEvent::class.java,
-                    object : XC_MethodReplacement() {
-                        override fun replaceHookedMethod(param: MethodHookParam): Any? {
-                            val handled = openCommentPanel(param.thisObject)
-                            if (!handled) {
-                                log("double tap swallowed; comment ability unavailable")
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (openCommentPanel(param.thisObject)) {
+                                param.result = null
+                            } else {
+                                log("double tap not consumed; falling through to TikTok default")
                             }
-                            return null
                         }
                     }
                 )
@@ -61,19 +61,45 @@ class MainHook : IXposedHookLoadPackage {
                 ?: return false.also { log("VideoCommentAssem not found") }
 
             var installed = false
-            installed = hookAllAfter(commentClass, "Nq") {
-                commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
-            } || installed
-            installed = hookAllAfter(commentClass, "Xq") {
-                commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
-            } || installed
-            installed = hookAllAfter(commentClass, "br") {
-                commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
-            } || installed
-            // TikTok 46.0.3: bind method rotated br -> up(VideoItemParams)
-            installed = hookAllAfter(commentClass, "up") {
-                commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
-            } || installed
+            var bindInstalled = false
+            for (methodName in COMMENT_BIND_METHODS) {
+                if (hookAllAfter(commentClass, methodName) {
+                        commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
+                    }
+                ) {
+                    log("resolved comment bind method via fastpath name=$methodName")
+                    bindInstalled = true
+                    break
+                }
+            }
+            if (!bindInstalled) {
+                val videoItemParamsClass = findClass(VIDEO_ITEM_PARAMS_CLASS)
+                val signatureNames = commentClass.declaredMethods
+                    .filter { method ->
+                        !Modifier.isStatic(method.modifiers) &&
+                            method.parameterTypes.size == 1 &&
+                            if (videoItemParamsClass != null) {
+                                method.parameterTypes[0] == videoItemParamsClass
+                            } else {
+                                method.parameterTypes[0].simpleName == "VideoItemParams"
+                            }
+                    }
+                    .map { it.name }
+                    .distinct()
+                for (methodName in signatureNames) {
+                    if (hookAllAfter(commentClass, methodName) {
+                            commentRegistry.registerBoundComment(it.thisObject, it.args.firstOrNull(), cl)
+                        }
+                    ) {
+                        log("resolved comment bind method via signature name=$methodName")
+                        bindInstalled = true
+                    }
+                }
+            }
+            if (!bindInstalled) {
+                log("FAILED to resolve comment bind method")
+            }
+            installed = bindInstalled || installed
             installed = hookAfter(commentClass, "onParentSet") {
                 commentRegistry.registerCurrentBinding(it.thisObject, cl)
             } || installed
@@ -86,14 +112,14 @@ class MainHook : IXposedHookLoadPackage {
 
         private fun openCommentPanel(diggComponent: Any): Boolean {
             val currentAid = TikTokReflect.currentAwemeAidFromDigg(diggComponent) ?: run {
-                log("double tap swallowed; current aweme aid unavailable")
+                log("double tap current aweme aid unavailable")
                 return false
             }
 
             // Fast path: ability registered under this aid. Fallback: TikTok recycles a
             // small pool of comment-assem instances, and on scroll it rebinds an existing
-            // instance to a new aweme WITHOUT re-invoking onBind (`up`), so the registry key
-            // goes stale while the live binding (LLJI.LL) tracks the current video. Scan the
+            // instance to a new aweme WITHOUT re-invoking the bind method, so the registry key
+            // goes stale while the live binding tracks the current video. Scan the
             // pooled abilities by their LIVE bound aid to find the current cell's ability.
             val ability = commentRegistry.findByAid(currentAid)
                 ?: commentRegistry.findByLiveAid(currentAid)
@@ -149,17 +175,46 @@ class MainHook : IXposedHookLoadPackage {
                 )
                 return false
             }
+
+            val fastMethod = COMMENT_OPEN_METHODS.firstOrNull { methodName ->
+                ability.javaClass.methods.any { it.name == methodName && it.parameterTypes.isEmpty() }
+            }
+            if (fastMethod != null) {
+                log("resolved comment open method via fastpath name=$fastMethod")
+                return runCatching {
+                    XposedHelpers.callMethod(ability, fastMethod)
+                    log("opened comment panel via $fastMethod aid=${shortAid(expectedAid)}")
+                    true
+                }.onFailure {
+                    log("failed to invoke comment open method $fastMethod: ${it.message}", it)
+                }.getOrDefault(false)
+            }
+
+            val abilityInterface = findClass(COMMENT_ABILITY_CLASS)
+            val signatureMethods = abilityInterface?.declaredMethods
+                ?.filter { method ->
+                    !Modifier.isStatic(method.modifiers) &&
+                        method.parameterTypes.isEmpty() &&
+                        method.returnType == Void.TYPE
+                }
+                .orEmpty()
+            if (signatureMethods.isEmpty()) {
+                log("FAILED to resolve comment open method")
+                return false
+            }
+
             var lastFailure: Throwable? = null
-            for (method in COMMENT_OPEN_METHODS) {
+            for (method in signatureMethods) {
+                log("resolved comment open method via signature name=${method.name}")
                 runCatching {
-                    XposedHelpers.callMethod(ability, method)
-                    log("opened comment panel via $method aid=${shortAid(expectedAid)}")
+                    XposedHelpers.callMethod(ability, method.name)
+                    log("opened comment panel via ${method.name} aid=${shortAid(expectedAid)}")
                     return true
                 }.onFailure {
                     lastFailure = it
                 }
             }
-            log("failed to invoke comment open methods $COMMENT_OPEN_METHODS: ${lastFailure?.message}")
+            log("failed to invoke signature comment open methods: ${lastFailure?.message}", lastFailure)
             return false
         }
 
@@ -261,7 +316,7 @@ class MainHook : IXposedHookLoadPackage {
         fun findByAid(aid: String): Any? = byAid[aid]?.get()
 
         // Recycled-cell resolution: return the pooled comment ability whose LIVE bound aid
-        // (read fresh from LLJI.LL each call) matches, regardless of its stale registry key.
+        // (read fresh from the resolved binding fields each call) matches, regardless of its stale key.
         @Synchronized
         fun findByLiveAid(aid: String): Any? {
             for (ref in byAid.values) {
@@ -291,8 +346,43 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private object TikTokReflect {
+        private val boundParamsFieldByClass = mutableMapOf<Class<*>, String>()
+        private val failedBoundParamsFieldClasses = mutableSetOf<Class<*>>()
+        private val failedVideoItemParamsClassAbilityClasses = mutableSetOf<Class<*>>()
+        private val videoItemParamsClassByLoader = mutableMapOf<ClassLoader, Class<*>?>()
+
         fun currentAwemeAidFromDigg(diggComponent: Any): String? {
-            val viewPagerAbility = firstMethodResult(diggComponent, "Ub", "Qb", "zb") ?: return null
+            val fastViewPagerAbility = firstMethodResult(
+                diggComponent,
+                VIEW_PAGER_ACCESSOR_METHODS
+            ) { methodName ->
+                log("resolved viewPager accessor via fastpath name=$methodName")
+            }
+            val viewPagerAbility = fastViewPagerAbility ?: run {
+                val componentClassLoader = diggComponent.javaClass.classLoader
+                val viewPagerClass = findClass(VIEW_PAGER_ABILITY_CLASS, componentClassLoader)
+                val signatureMethod = if (viewPagerClass == null) {
+                    null
+                } else {
+                    diggComponent.javaClass.declaredMethods
+                        .filter { method ->
+                            !Modifier.isStatic(method.modifiers) &&
+                                method.parameterTypes.isEmpty() &&
+                                viewPagerClass.isAssignableFrom(method.returnType)
+                        }
+                        .singleOrNull()
+                }
+                val resolved = signatureMethod?.let {
+                    callMethodQuiet(diggComponent, it.name)
+                }
+                if (resolved != null && signatureMethod != null) {
+                    log("resolved viewPager accessor via signature name=${signatureMethod.name}")
+                    resolved
+                } else {
+                    log("FAILED to resolve viewPager accessor")
+                    null
+                }
+            } ?: return null
 
             firstAwemeAidFrom(
                 viewPagerAbility,
@@ -310,9 +400,54 @@ class MainHook : IXposedHookLoadPackage {
 
         fun boundAwemeAidFromCommentAbility(commentAbility: Any?): String? {
             if (commentAbility == null) return null
-            val reusedScope = getObjectField(commentAbility, "LLJI") ?: return null
-            val videoItemParams = getObjectField(reusedScope, "LL")
-            return aidFromVideoItemParams(videoItemParams)
+            val abilityClass = commentAbility.javaClass
+            val cachedField = synchronized(boundParamsFieldByClass) {
+                boundParamsFieldByClass[abilityClass]
+            }
+            if (cachedField != null) {
+                val cachedAid = aidFromVideoItemParams(
+                    videoItemParamsFromOuterField(commentAbility, cachedField)
+                )
+                if (cachedAid != null) {
+                    return cachedAid
+                }
+                // A miss does NOT mean the cached name went stale: obfuscated field
+                // names cannot change within a process, but TikTok binds the params on
+                // a worker thread, so an instance read before its bind completes yields
+                // null transiently. Evicting here would drop a valid entry that another
+                // thread just populated. Fall through to a full re-resolution instead —
+                // if some other field genuinely holds the binding it is cached below,
+                // otherwise the tail failure log reports the unreadable state.
+            }
+
+            for (fieldName in BOUND_PARAMS_FIELD_NAMES) {
+                val videoItemParams = videoItemParamsFromOuterField(commentAbility, fieldName)
+                    ?: continue
+                val aid = aidFromVideoItemParams(videoItemParams) ?: continue
+                cacheBoundParamsField(abilityClass, fieldName)
+                log("resolved bound-params field via fastpath name=$fieldName")
+                return aid
+            }
+
+            val probedFieldNames = BOUND_PARAMS_FIELD_NAMES.toMutableSet()
+            var currentClass: Class<*>? = abilityClass
+            while (currentClass != null && currentClass != Any::class.java) {
+                for (field in currentClass.declaredFields) {
+                    if (!probedFieldNames.add(field.name) || Modifier.isStatic(field.modifiers)) {
+                        continue
+                    }
+                    val videoItemParams =
+                        videoItemParamsFromOuterField(commentAbility, field.name) ?: continue
+                    val aid = aidFromVideoItemParams(videoItemParams) ?: continue
+                    cacheBoundParamsField(abilityClass, field.name)
+                    log("resolved bound-params field via signature name=${field.name}")
+                    return aid
+                }
+                currentClass = currentClass.superclass
+            }
+
+            logBoundParamsFailureOnce(abilityClass)
+            return null
         }
 
         fun aidFromVideoItemParams(videoItemParams: Any?): String? {
@@ -336,10 +471,21 @@ class MainHook : IXposedHookLoadPackage {
         }
 
         private fun firstMethodResult(instance: Any?, vararg methods: String): Any? {
+            return firstMethodResult(instance, methods.asList())
+        }
+
+        private fun firstMethodResult(
+            instance: Any?,
+            methods: List<String>,
+            onResolved: ((String) -> Unit)? = null
+        ): Any? {
             if (instance == null) return null
             for (method in methods) {
                 val result = callMethodQuiet(instance, method)
-                if (result != null) return result
+                if (result != null) {
+                    onResolved?.invoke(method)
+                    return result
+                }
             }
             log("none of ${methods.joinToString(prefix = "[", postfix = "]")} worked on ${instance.javaClass.name}")
             return null
@@ -374,12 +520,67 @@ class MainHook : IXposedHookLoadPackage {
             }.getOrNull()
         }
 
-        private fun getObjectField(instance: Any?, field: String): Any? {
+        private fun videoItemParamsFromOuterField(instance: Any, outerField: String): Any? {
+            val holder = getObjectField(instance, outerField, logFailure = false) ?: return null
+            val videoItemParams = getObjectField(holder, "LL", logFailure = false) ?: return null
+            val classLoader = instance.javaClass.classLoader
+            val videoItemParamsClass = synchronized(videoItemParamsClassByLoader) {
+                if (videoItemParamsClassByLoader.containsKey(classLoader)) {
+                    videoItemParamsClassByLoader[classLoader]
+                } else {
+                    findClass(VIDEO_ITEM_PARAMS_CLASS, classLoader).also {
+                        videoItemParamsClassByLoader[classLoader] = it
+                    }
+                }
+            }
+            if (videoItemParamsClass == null) {
+                val abilityClass = instance.javaClass
+                val shouldLogFailure = synchronized(failedVideoItemParamsClassAbilityClasses) {
+                    failedVideoItemParamsClassAbilityClasses.add(abilityClass)
+                }
+                if (shouldLogFailure) {
+                    log("FAILED to resolve VideoItemParams class name=$VIDEO_ITEM_PARAMS_CLASS")
+                }
+            } else if (!videoItemParamsClass.isInstance(videoItemParams)) {
+                return null
+            }
+
+            val aweme = callMethodQuiet(videoItemParams, "getAweme") ?: return null
+            val aid = aidFromAweme(aweme)
+            return videoItemParams.takeIf { !aid.isNullOrBlank() }
+        }
+
+        private fun cacheBoundParamsField(clazz: Class<*>, fieldName: String) {
+            synchronized(boundParamsFieldByClass) {
+                boundParamsFieldByClass[clazz] = fieldName
+            }
+            synchronized(failedBoundParamsFieldClasses) {
+                failedBoundParamsFieldClasses.remove(clazz)
+            }
+        }
+
+        private fun logBoundParamsFailureOnce(clazz: Class<*>, detail: String? = null) {
+            val shouldLogFailure = synchronized(failedBoundParamsFieldClasses) {
+                failedBoundParamsFieldClasses.add(clazz)
+            }
+            if (shouldLogFailure) {
+                val suffix = detail?.let { ": $it" }.orEmpty()
+                log("FAILED to resolve bound-params field$suffix")
+            }
+        }
+
+        private fun getObjectField(
+            instance: Any?,
+            field: String,
+            logFailure: Boolean = true
+        ): Any? {
             if (instance == null) return null
             return runCatching {
                 XposedHelpers.getObjectField(instance, field)
             }.onFailure {
-                log("reflect field failed: ${instance.javaClass.name}.$field: ${it.message}")
+                if (logFailure) {
+                    log("reflect field failed: ${instance.javaClass.name}.$field: ${it.message}")
+                }
             }.getOrNull()
         }
 
@@ -394,8 +595,14 @@ class MainHook : IXposedHookLoadPackage {
         private const val MAX_AID_CACHE_SIZE = 12
         private const val COMMENT_ABILITY_CLASS =
             "com.ss.android.ugc.aweme.feed.assem.ability.IVideoCommentAbility"
-        // "Ob0" added for TikTok 46.0.3 (IVideoCommentAbility no-arg open, Xp(2, …))
-        private val COMMENT_OPEN_METHODS = listOf("Kb0", "jc0", "cc0", "Ob0")
+        private const val VIDEO_ITEM_PARAMS_CLASS =
+            "com.ss.android.ugc.aweme.feed.model.VideoItemParams"
+        private const val VIEW_PAGER_ABILITY_CLASS =
+            "com.ss.android.ugc.feed.platform.panel.viewpager.IViewPagerComponentAbility"
+        private val VIEW_PAGER_ACCESSOR_METHODS = listOf("Yb", "Ub", "Qb", "zb")
+        private val COMMENT_BIND_METHODS = listOf("hs", "up", "br", "Xq", "Nq")
+        private val COMMENT_OPEN_METHODS = listOf("Id0", "Ob0", "cc0", "jc0", "Kb0")
+        private val BOUND_PARAMS_FIELD_NAMES = listOf("LLJIJIL", "LLJI")
 
         private val TARGET_PACKAGES = setOf(
             "com.ss.android.ugc.trill",
